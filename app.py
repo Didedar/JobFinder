@@ -26,8 +26,8 @@ uploads_dir = os.path.join(os.getcwd(), "uploads")
 os.makedirs(uploads_dir, exist_ok=True)
 app.config["UPLOADS_FOLDER"] = uploads_dir
 
-tokenizer = AutoTokenizer.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english")
-model = AutoModelForTokenClassification.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english")
+tokenizer = AutoTokenizer.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english", force_download=True)
+model = AutoModelForTokenClassification.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english", force_download=True)
 nlp = pipeline("ner", model=model, tokenizer=tokenizer)
 
 logging.basicConfig(level=logging.INFO)
