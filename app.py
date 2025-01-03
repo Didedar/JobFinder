@@ -149,6 +149,3 @@ def upload():
         return jsonify({"keywords": keywords, "vacancies": vacancies, "similarity_scores": similarity_scores})
     
     return render_template("upload.html")
-
-if __name__ == "__main__":
-    
