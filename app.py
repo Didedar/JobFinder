@@ -151,4 +151,4 @@ def upload():
     return render_template("upload.html")
 
 if __name__ == "__main__":
-    app.run(debug=os.getenv('FLASK_DEBUG', 'false') == 'true')
+    
