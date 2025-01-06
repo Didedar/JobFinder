@@ -5,14 +5,9 @@
       "src": "app.py",
       "use": "@vercel/python",
       "config": {
-        "runtime": "python-3.11"
+        "runtime": "python3.11",
+        "maxLambdaSize": "15mb"
       }
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "app.py"
     }
   ]
 }
