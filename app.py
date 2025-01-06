@@ -1,4 +1,4 @@
-from flask import Flask, render_template, redirect, request, url_for, jsonify, session, flash
+from flask import Flask, render_template, request, jsonify
 from PyPDF2 import PdfReader
 import os
 from werkzeug.utils import secure_filename
@@ -6,143 +6,120 @@ import re
 import requests
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
-from gensim.models import KeyedVectors
-from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassification
-import io
+from sklearn.metrics.pairwise import cosine_similarity
+from docx import Document
+import secrets
 import logging
 from werkzeug.exceptions import RequestEntityTooLarge
-from docx import Document
-from sklearn.metrics.pairwise import cosine_similarity
-import secrets
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = secrets.token_hex(16)  # Уменьшили размер ключа
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # Уменьшили максимальный размер файла до 5MB
 
-secret_key = secrets.token_hex(32)
-
-app.config['SECRET_KEY'] = secret_key
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-
+# Настройка директории для загрузок
 uploads_dir = os.path.join(os.getcwd(), "uploads")
 os.makedirs(uploads_dir, exist_ok=True)
 app.config["UPLOADS_FOLDER"] = uploads_dir
 
-tokenizer = AutoTokenizer.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english", force_download=True)
-model = AutoModelForTokenClassification.from_pretrained("dbmdz/bert-large-cased-finetuned-conll03-english", force_download=True)
-nlp = pipeline("ner", model=model, tokenizer=tokenizer)
-
+# Базовая настройка логгера
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @app.errorhandler(RequestEntityTooLarge)
 def handle_file_too_large(error):
-    return 'File is too large', 413
+    return 'Файл слишком большой (максимум 5MB)', 413
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
 def preprocess_text(text):
-    text = re.sub(r'[^\w\s]', '', text)  
-    text = text.lower()  
-    return text
+    return re.sub(r'[^\w\s]', '', text.lower())
 
 def extract_keywords_tfidf(text, top_n=10):
-    vectorizer = TfidfVectorizer(max_features=1000, stop_words="english")
+    vectorizer = TfidfVectorizer(max_features=500, stop_words="english")  # Уменьшили max_features
     tfidf_matrix = vectorizer.fit_transform([text])
-    tfidf_scores = np.array(tfidf_matrix.sum(axis=0)).flatten()
-    tfidf_features = vectorizer.get_feature_names_out()
-    keywords = sorted(zip(tfidf_features, tfidf_scores), key=lambda x: x[1], reverse=True)[:top_n]
-    return [word for word, score in keywords]
+    feature_names = vectorizer.get_feature_names_out()
+    scores = np.array(tfidf_matrix.sum(axis=0)).flatten()
+    return [word for word, _ in sorted(zip(feature_names, scores), key=lambda x: x[1], reverse=True)[:top_n]]
 
-def search_vacancies(keywords, top_n=10):
-    query = " ".join(keywords)
+def search_vacancies(keywords, top_n=5):  # Уменьшили количество вакансий
     try:
-        response = requests.get("https://api.hh.ru/vacancies", params={"text": query, "per_page": top_n})
-        response.raise_for_status()  
-        vacancies = response.json().get("items", [])
-        return [
-            {
-                "title": vacancy.get("name", "No title"),
-                "url": vacancy.get("alternate_url", ""),
-                "snippet": vacancy.get("snippet", {}).get("requirement", "No description"),
-                "salary": vacancy.get("salary", {}),
-                "employment_type": vacancy.get("employment", {}).get("name", "Не указано")
-            }
-            for vacancy in vacancies
-        ]
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error fetching vacancies: {str(e)}")
-        return f"Error fetching vacancies: {str(e)}", 500
+        response = requests.get(
+            "https://api.hh.ru/vacancies",
+            params={"text": " ".join(keywords), "per_page": top_n},
+            timeout=5  # Добавили timeout
+        )
+        response.raise_for_status()
+        return [{
+            "title": v.get("name", "Без названия"),
+            "url": v.get("alternate_url", ""),
+            "snippet": v.get("snippet", {}).get("requirement", "Нет описания"),
+            "salary": v.get("salary", {}),
+            "employment_type": v.get("employment", {}).get("name", "Не указано")
+        } for v in response.json().get("items", [])]
+    except Exception as e:
+        logger.error(f"Ошибка при поиске вакансий: {str(e)}")
+        return []
 
 def compute_similarity_scores(keywords, vacancies):
-    """
-    Считает схожесть между ключевыми словами и текстами вакансий.
-    """
-    # Преобразование входных данных в текст
-    documents = [str(keywords)]  # ключевые слова добавляем первым элементом, приводим к строке
+    if not vacancies:
+        return {}
     
-    # Добавляем вакансии, приводя их snippet к строкам
-    for vacancy in vacancies:
-        snippet = vacancy.get('snippet', '')
-        documents.append(str(snippet))  # приводим snippet к строке
-
-    # Векторизация документов
+    documents = [" ".join(keywords)] + [v.get('snippet', '') for v in vacancies]
     vectorizer = TfidfVectorizer()
-    tfidf_matrix = vectorizer.fit_transform(documents)
-
-    # Расчёт схожести
-    similarity_matrix = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])
-    similarity_scores = {vacancies[i]['title']: similarity_matrix[0, i] for i in range(len(vacancies))}
-
-    return similarity_scores
+    try:
+        tfidf_matrix = vectorizer.fit_transform(documents)
+        similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])
+        return {v['title']: float(similarities[0, i]) for i, v in enumerate(vacancies)}
+    except Exception as e:
+        logger.error(f"Ошибка при расчете схожести: {str(e)}")
+        return {v['title']: 0.0 for v in vacancies}
 
 @app.route("/upload", methods=["POST", "GET"])
 def upload():
-    if request.method == "POST":
-        if "resume" not in request.files:
-            logger.error("No file part in the request")
-            return "No file part", 400
+    if request.method != "POST":
+        return render_template("upload.html")
 
-        file = request.files["resume"]
+    if "resume" not in request.files:
+        return jsonify({"error": "Файл не найден"}), 400
 
-        if file.filename == '':
-            logger.error("No selected file")
-            return "No selected file", 400
+    file = request.files["resume"]
+    if not file or file.filename == '':
+        return jsonify({"error": "Файл не выбран"}), 400
 
-        if not file.filename.lower().endswith(('.pdf', '.doc', 'docx')):
-            logger.error(f"Invalid file type: {file.filename}")
-            return "File is not PDF, DOC, DOCX", 400
+    if not file.filename.lower().endswith(('.pdf', '.doc', '.docx')):
+        return jsonify({"error": "Неподдерживаемый формат файла"}), 400
 
+    try:
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config["UPLOADS_FOLDER"], filename)
         file.save(file_path)
 
-        try:
-            if file.filename.endswith('.pdf'):
-                reader = PdfReader(file_path)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text()
-                text = preprocess_text(text)
-            elif file.filename.endswith(('.doc', '.docx')):
-                doc = Document(file_path)
-                text = []
-                for para in doc.paragraphs:
-                    text.append(para.text)
-                text = preprocess_text(text)
-        except Exception as e:
-            logger.error(f"Error processing file {file.filename}: {str(e)}")
-            return jsonify({"error": f"Error processing file: {str(e)}"}), 500
+        text = ""
+        if file.filename.endswith('.pdf'):
+            reader = PdfReader(file_path)
+            text = " ".join(page.extract_text() for page in reader.pages)
+        else:
+            doc = Document(file_path)
+            text = " ".join(para.text for para in doc.paragraphs)
 
-        text1 = extract_keywords_tfidf(text)
-        keywords = list(set(text1))
-
+        os.remove(file_path)  # Удаляем файл после обработки
+        
+        text = preprocess_text(text)
+        keywords = extract_keywords_tfidf(text)
         vacancies = search_vacancies(keywords)
         similarity_scores = compute_similarity_scores(keywords, vacancies)
 
-        return jsonify({"keywords": keywords, "vacancies": vacancies, "similarity_scores": similarity_scores})
-    
-    return render_template("upload.html")
+        return jsonify({
+            "keywords": keywords,
+            "vacancies": vacancies,
+            "similarity_scores": similarity_scores
+        })
+
+    except Exception as e:
+        logger.error(f"Ошибка обработки файла: {str(e)}")
+        return jsonify({"error": f"Ошибка обработки файла: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    app.run()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
