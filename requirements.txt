@@ -1,7 +1,5 @@
-flask
-PyPDF2
-Werkzeug
-requests
-numpy
-scikit-learn
-python-docx
+flask==2.0.1
+PyPDF2==3.0.1
+python-docx==0.8.11
+requests==2.26.0
+Werkzeug==2.0.1
