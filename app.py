@@ -4,28 +4,26 @@ import os
 from werkzeug.utils import secure_filename
 import re
 import requests
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from collections import Counter
 from docx import Document
 import secrets
 import logging
 from werkzeug.exceptions import RequestEntityTooLarge
+from math import sqrt
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = secrets.token_hex(16)  # Уменьшили размер ключа
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # Уменьшили максимальный размер файла до 5MB
+app.config['SECRET_KEY'] = secrets.token_hex(16)
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024
 
-# Настройка директории для загрузок
 uploads_dir = os.path.join(os.getcwd(), "uploads")
 os.makedirs(uploads_dir, exist_ok=True)
 app.config["UPLOADS_FOLDER"] = uploads_dir
 
-# Базовая настройка логгера
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@app.errorhandler(RequestEntityTooLarge)
+STOP_WORDS = {'and', 'the', 'or', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+
 def handle_file_too_large(error):
     return 'Файл слишком большой (максимум 5MB)', 413
 
@@ -34,21 +32,37 @@ def index():
     return render_template("index.html")
 
 def preprocess_text(text):
-    return re.sub(r'[^\w\s]', '', text.lower())
+    # Простая предобработка текста
+    text = text.lower()
+    text = re.sub(r'[^\w\s]', ' ', text)
+    words = text.split()
+    return [w for w in words if w not in STOP_WORDS and len(w) > 2]
 
-def extract_keywords_tfidf(text, top_n=10):
-    vectorizer = TfidfVectorizer(max_features=500, stop_words="english")  # Уменьшили max_features
-    tfidf_matrix = vectorizer.fit_transform([text])
-    feature_names = vectorizer.get_feature_names_out()
-    scores = np.array(tfidf_matrix.sum(axis=0)).flatten()
-    return [word for word, _ in sorted(zip(feature_names, scores), key=lambda x: x[1], reverse=True)[:top_n]]
+def extract_keywords(text, top_n=10):
+    # Простое извлечение ключевых слов на основе частоты
+    words = preprocess_text(text)
+    word_freq = Counter(words)
+    return [word for word, _ in word_freq.most_common(top_n)]
 
-def search_vacancies(keywords, top_n=5):  # Уменьшили количество вакансий
+def cosine_similarity_simple(text1, text2):
+    # Простая реализация косинусного сходства
+    words1 = set(preprocess_text(text1))
+    words2 = set(preprocess_text(text2))
+    
+    intersection = words1.intersection(words2)
+    
+    if not words1 or not words2:
+        return 0.0
+        
+    similarity = len(intersection) / (sqrt(len(words1)) * sqrt(len(words2)))
+    return similarity
+
+def search_vacancies(keywords, top_n=5):
     try:
         response = requests.get(
             "https://api.hh.ru/vacancies",
             params={"text": " ".join(keywords), "per_page": top_n},
-            timeout=5  # Добавили timeout
+            timeout=5
         )
         response.raise_for_status()
         return [{
@@ -66,15 +80,11 @@ def compute_similarity_scores(keywords, vacancies):
     if not vacancies:
         return {}
     
-    documents = [" ".join(keywords)] + [v.get('snippet', '') for v in vacancies]
-    vectorizer = TfidfVectorizer()
-    try:
-        tfidf_matrix = vectorizer.fit_transform(documents)
-        similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])
-        return {v['title']: float(similarities[0, i]) for i, v in enumerate(vacancies)}
-    except Exception as e:
-        logger.error(f"Ошибка при расчете схожести: {str(e)}")
-        return {v['title']: 0.0 for v in vacancies}
+    keyword_text = " ".join(keywords)
+    return {
+        v['title']: cosine_similarity_simple(keyword_text, v.get('snippet', ''))
+        for v in vacancies
+    }
 
 @app.route("/upload", methods=["POST", "GET"])
 def upload():
@@ -106,8 +116,7 @@ def upload():
 
         os.remove(file_path)  # Удаляем файл после обработки
         
-        text = preprocess_text(text)
-        keywords = extract_keywords_tfidf(text)
+        keywords = extract_keywords(text)
         vacancies = search_vacancies(keywords)
         similarity_scores = compute_similarity_scores(keywords, vacancies)
 
